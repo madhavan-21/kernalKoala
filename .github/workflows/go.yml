@@ -29,10 +29,17 @@ jobs:
           go build -v ./...
           go test -v ./...
 
-      - name: Ensure bin directory exists
-        run: mkdir -p bin
+      - name: ✅ Check if binary exists
+        run: |
+          mkdir -p bin
+          if ls bin/* 1> /dev/null 2>&1; then
+            echo "✅ Binary found in bin/"
+          else
+            echo "❌ No binary found in bin/"
+            exit 1
+          fi
 
-      - name: List contents of bin directory
+      - name: 🗂 List contents of bin directory
         run: ls -lh bin/
 
   notify-on-failure:
@@ -40,5 +47,11 @@ jobs:
     if: failure()
     runs-on: ubuntu-latest
     steps:
-      - name: ❌ Send failure notification
-        run: echo "Build or test failed. Check the GitHub Actions logs."
+      - name: ❌ Notify via GitHub issue
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "❌ CI Failed in Go Workflow"
+          content-file: .github/workflow_failure_message.md
+          labels: |
+            ci
+            failure
