@@ -5,15 +5,18 @@ import (
 	"encoding/binary"
 	"fmt"
 	l "kernelKoala/internal/logger"
+	"log"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 type Event struct {
@@ -48,7 +51,18 @@ func NetworkTrafficCapture(log *l.Logger) {
 		log.Fatal("Unsupported architecture: %s", arch)
 	}
 
-	bpfPath := fmt.Sprintf("../bpf/network/build/%s/tc.o", archDir)
+	log.Info("CPU arch %s", archDir)
+
+	//bpfPath := fmt.Sprintf("../../bpf/network/build/tc-%s.o", archDir)
+	//bpfPath = "../../bpf/network/build/tc-x86_64.o"
+
+	_, filename, _, _ := runtime.Caller(0)
+	sourceDir := filepath.Dir(filename)
+
+	bpfPath := filepath.Join(sourceDir, "../../bpf/network/build/tc-"+archDir+".o")
+
+	log.Info("📄 Loading BPF from absolute path: %s", bpfPath)
+
 	spec, err := ebpf.LoadCollectionSpec(bpfPath)
 	if err != nil {
 		log.Fatal("failed to load eBPF spec from %s: %v", bpfPath, err)
@@ -61,6 +75,9 @@ func NetworkTrafficCapture(log *l.Logger) {
 		TcEgress  *ebpf.Program `ebpf:"tc_egress"`
 		Events    *ebpf.Map     `ebpf:"events"`
 	}
+
+	//
+	raiseMemlockLimit()
 
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
 		log.Fatal("failed to load eBPF spec %v", err)
@@ -375,4 +392,16 @@ func resolveIP(ip net.IP) string {
 		return "-"
 	}
 	return names[0]
+}
+
+//raiseMemlockLimit() is added to allow the app to lock more memory, which is needed for eBPF programs and maps. Without it, the app may fail with "permission denied" errors. It solves this by raising the memory lock limit to unlimited.
+
+func raiseMemlockLimit() {
+	rLimit := &unix.Rlimit{
+		Cur: unix.RLIM_INFINITY,
+		Max: unix.RLIM_INFINITY,
+	}
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, rLimit); err != nil {
+		log.Fatalf("❌ Failed to raise rlimit: %v", err)
+	}
 }
