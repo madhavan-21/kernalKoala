@@ -1,8 +1,5 @@
-@madhavan-21
+❌ CI Workflow failed for the latest push to `main`.
 
-The CI workflow **failed** on branch `${{ github.ref }}`.
+Triggered by: @${{ github.actor }}
 
-Commit: `${{ github.sha }}`
-Check: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-Please take a look.
+Please check the [GitHub Actions logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
