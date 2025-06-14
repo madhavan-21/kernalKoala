@@ -28,6 +28,9 @@ if ! command_exists llc; then PKGS="$PKGS llvm"; fi
 if ! command_exists make; then PKGS="$PKGS make"; fi
 if ! command_exists bpftool; then PKGS="$PKGS bpftool"; fi
 
+# Essential libraries
+PKGS="$PKGS libelf-dev gcc-multilib libbpf-dev"
+
 # Install kernel headers
 KERNEL_HEADERS_PATH="/lib/modules/$(uname -r)/build"
 if [ ! -d "$KERNEL_HEADERS_PATH" ]; then
@@ -35,17 +38,28 @@ if [ ! -d "$KERNEL_HEADERS_PATH" ]; then
     PKGS="$PKGS linux-headers-$(uname -r)"
 fi
 
-if [ ! -e "/lib/modules/$(uname -r)/build/include/asm/types.h" ]; then
+# Fix missing asm/ headers for some distros
+if [ ! -e "$KERNEL_HEADERS_PATH/include/asm/types.h" ]; then
   echo "🔧 Linking missing asm/ headers..."
-  sudo ln -s ../arch/x86/include/asm /lib/modules/$(uname -r)/build/include/asm
+  sudo ln -s ../arch/x86/include/asm "$KERNEL_HEADERS_PATH/include/asm"
 fi
 
-if [ -n "$PKGS" ]; then
-    echo "📦 Installing packages: $PKGS"
-    sudo apt update
-    sudo apt install -y $PKGS
-else
-    echo "✅ All eBPF dependencies already installed."
+# Install all required packages
+echo "📦 Installing packages: $PKGS"
+sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $PKGS
+
+# Optional: clone libbpf submodule if using
+if [ -f .gitmodules ]; then
+    echo "🔁 Initializing submodules..."
+    git submodule update --init --recursive
 fi
+
+# Debugging: Show versions
+echo "🔧 Tool versions:"
+clang --version || true
+llc --version || true
+bpftool version || true
+go version
 
 echo "🎉 Installation complete."
