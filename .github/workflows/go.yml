@@ -29,7 +29,10 @@ jobs:
           go build -v ./...
           go test -v ./...
 
-      - name: ✅ Show bin directory
+      - name: Ensure bin directory exists
+        run: mkdir -p bin
+
+      - name: List contents of bin directory
         run: ls -lh bin/
 
   notify-on-failure:
