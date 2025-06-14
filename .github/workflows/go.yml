@@ -42,12 +42,28 @@ jobs:
       - name: 🗂 List contents of bin directory
         run: ls -lh bin/
 
+  notify-on-success:
+    needs: build
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - name: ✅ Notify via GitHub issue (success)
+        uses: peter-evans/create-issue-from-file@v5
+        with:
+          title: "✅ CI Passed in Go Workflow"
+          content-file: .github/workflow_success_message.md
+          labels: |
+            ci
+            success
+          assignees: madhavan-21
+
+
   notify-on-failure:
     needs: build
     if: failure()
     runs-on: ubuntu-latest
     steps:
-      - name: ❌ Notify via GitHub issue
+      - name: ❌ Notify via GitHub issue (failure)
         uses: peter-evans/create-issue-from-file@v5
         with:
           title: "❌ CI Failed in Go Workflow"
@@ -55,3 +71,5 @@ jobs:
           labels: |
             ci
             failure
+          assignees: madhavan-21
+
