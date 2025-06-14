@@ -1,0 +1,41 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🧰 Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.20'
+
+      - name: 🛠️ Install dependencies 
+        run: |
+          chmod +x ./scripts/install.sh
+          make install
+
+      - name: 🔨 Build & Test
+        run: |
+          go build -v ./...
+          go test -v ./...
+
+      - name: ✅ Show bin directory
+        run: ls -lh bin/
+
+  notify-on-failure:
+    needs: build
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: ❌ Send failure notification
+        run: echo "Build or test failed. Check the GitHub Actions logs."
