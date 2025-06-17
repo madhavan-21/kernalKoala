@@ -36,6 +36,22 @@ type PayLoadTc struct {
 }
 
 func NetworkTrafficCapture(log *l.Logger) {
+
+	tcpChan := make(chan PayLoadTc)
+	udpChan := make(chan PayLoadTc)
+	icmpChan := make(chan PayLoadTc)
+	unknownChan := make(chan PayLoadTc)
+
+	printer := ifaceTablePrinter{
+		chTCP:     tcpChan,
+		chUDP:     udpChan,
+		chICMP:    icmpChan,
+		chUnknown: unknownChan,
+		tableData: make(map[string][]Event),
+	}
+
+	printer.InitTable()
+
 	// Validate args
 	if len(os.Args) < 2 {
 		log.Fatal("please specify the network interface")
@@ -175,10 +191,32 @@ func NetworkTrafficCapture(log *l.Logger) {
 						continue
 					}
 
-					eventChan <- PayLoadTc{
+					if proto := protocolName(event.Protocol); proto == "TCP" {
+						printer.chTCP <- PayLoadTc{
+							Iface: iface.Name,
+							Event: event,
+						}
+					}
+					if proto := protocolName(event.Protocol); proto == "UDP" {
+						printer.chUDP <- PayLoadTc{
+							Iface: iface.Name,
+							Event: event,
+						}
+
+					}
+					if proto := protocolName(event.Protocol); proto == "IMCP" {
+						printer.chICMP <- PayLoadTc{
+							Iface: iface.Name,
+							Event: event,
+						}
+
+					}
+
+					printer.chUnknown <- PayLoadTc{
 						Iface: iface.Name,
 						Event: event,
 					}
+
 				}
 			}()
 
