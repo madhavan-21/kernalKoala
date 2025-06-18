@@ -37,16 +37,10 @@ type PayLoadTc struct {
 
 func NetworkTrafficCapture(log *l.Logger) {
 
-	tcpChan := make(chan PayLoadTc)
-	udpChan := make(chan PayLoadTc)
-	icmpChan := make(chan PayLoadTc)
-	unknownChan := make(chan PayLoadTc)
+	EvenChan := make(chan PayLoadTc)
 
 	printer := ifaceTablePrinter{
-		chTCP:     tcpChan,
-		chUDP:     udpChan,
-		chICMP:    icmpChan,
-		chUnknown: unknownChan,
+		chEvent:   EvenChan,
 		tableData: make(map[string][]Event),
 	}
 
@@ -104,11 +98,11 @@ func NetworkTrafficCapture(log *l.Logger) {
 	var wg sync.WaitGroup
 
 	// Optional consumer
-	go func() {
-		for evt := range eventChan {
-			printPacket(evt.Event, evt.Iface)
-		}
-	}()
+	//go func() {
+	// 	for evt := range eventChan {
+	// 		printPacket(evt.Event, evt.Iface)
+	// 	}
+	// }()
 
 	for _, iface := range Interfaces {
 		wg.Add(1)
@@ -191,28 +185,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 						continue
 					}
 
-					if proto := protocolName(event.Protocol); proto == "TCP" {
-						printer.chTCP <- PayLoadTc{
-							Iface: iface.Name,
-							Event: event,
-						}
-					}
-					if proto := protocolName(event.Protocol); proto == "UDP" {
-						printer.chUDP <- PayLoadTc{
-							Iface: iface.Name,
-							Event: event,
-						}
-
-					}
-					if proto := protocolName(event.Protocol); proto == "IMCP" {
-						printer.chICMP <- PayLoadTc{
-							Iface: iface.Name,
-							Event: event,
-						}
-
-					}
-
-					printer.chUnknown <- PayLoadTc{
+					printer.chEvent <- PayLoadTc{
 						Iface: iface.Name,
 						Event: event,
 					}
