@@ -45,7 +45,6 @@ func NetworkTrafficCapture(log *l.Logger) {
 	}
 
 	printer.InitTable()
-
 	// Validate args
 	if len(os.Args) < 2 {
 		log.Fatal("please specify the network interface")

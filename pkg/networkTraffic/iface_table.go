@@ -9,26 +9,27 @@ import (
 )
 
 type ifaceTablePrinter struct {
-	chEvent   chan PayLoadTc
-	tableData map[string][]Event
-	mapLock   sync.RWMutex
-	maxTables int
-	app       *tview.Application
-	tableView *tview.Flex
-	tables    map[string]*tview.Table
+	chEvent            chan PayLoadTc
+	tableData          map[string][]Event
+	mapLock            sync.RWMutex
+	maxTables          int
+	app                *tview.Application
+	tables             map[string]*tview.Table
+	ifaceOrder         []string
+	selectedIfaceIndex int
 }
 
 func (i *ifaceTablePrinter) InitTable() {
 	i.tableData = make(map[string][]Event)
-	i.maxTables = 6
-	i.app = tview.NewApplication()
-	i.tableView = tview.NewFlex().SetDirection(tview.FlexRow)
 	i.tables = make(map[string]*tview.Table)
+	i.ifaceOrder = []string{}
+	i.maxTables = 8
+	i.app = tview.NewApplication()
 
 	go i.forward()
 
 	go func() {
-		if err := i.app.SetRoot(i.tableView, true).EnableMouse(true).Run(); err != nil {
+		if err := i.app.SetRoot(tview.NewBox(), true).EnableMouse(true).Run(); err != nil {
 			panic(err)
 		}
 	}()
@@ -37,20 +38,30 @@ func (i *ifaceTablePrinter) InitTable() {
 func (i *ifaceTablePrinter) forward() {
 	for ev := range i.chEvent {
 		i.mapLock.Lock()
-		if _, exists := i.tableData[ev.Iface]; !exists {
+		_, exists := i.tableData[ev.Iface]
+		if !exists {
 			if len(i.tableData) >= i.maxTables {
 				i.mapLock.Unlock()
-				continue // Skip if over max
+				continue
 			}
-			i.tableData[ev.Iface] = make([]Event, 0)
+			i.tableData[ev.Iface] = []Event{}
 			i.tables[ev.Iface] = createInterfaceTable(ev.Iface)
-			i.tableView.AddItem(i.tables[ev.Iface], 12, 1, false)
+			i.ifaceOrder = append(i.ifaceOrder, ev.Iface)
 		}
+
 		i.tableData[ev.Iface] = append(i.tableData[ev.Iface], ev.Event)
 		if len(i.tableData[ev.Iface]) > 10 {
 			i.tableData[ev.Iface] = i.tableData[ev.Iface][len(i.tableData[ev.Iface])-10:]
 		}
-		i.updateTable(ev.Iface)
+
+		iface := ev.Iface
+		i.app.QueueUpdateDraw(func() {
+			i.updateTable(iface)
+			// Only show the first iface as default root
+			if len(i.ifaceOrder) == 1 {
+				i.app.SetRoot(i.tables[iface], true)
+			}
+		})
 		i.mapLock.Unlock()
 	}
 }
@@ -115,3 +126,30 @@ func protocolName(proto uint8) string {
 // - type Event with Protocol, Direction, SrcIP, DstIP, SrcPort, DstPort, TcpFlags
 // - func intToIP(uint32) string
 // - func tcpFlagsToString(uint8) string
+
+func (i *ifaceTablePrinter) RunUI() {
+	i.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if len(i.ifaceOrder) == 0 {
+			return event
+		}
+
+		switch event.Key() {
+		case tcell.KeyRight:
+			i.selectedIfaceIndex = (i.selectedIfaceIndex + 1) % len(i.ifaceOrder)
+		case tcell.KeyLeft:
+			i.selectedIfaceIndex = (i.selectedIfaceIndex - 1 + len(i.ifaceOrder)) % len(i.ifaceOrder)
+		default:
+			return event
+		}
+
+		nextIface := i.ifaceOrder[i.selectedIfaceIndex]
+		i.app.QueueUpdateDraw(func() {
+			i.app.SetRoot(i.tables[nextIface], true)
+		})
+		return nil
+	})
+
+	if err := i.app.Run(); err != nil {
+		panic(err)
+	}
+}
