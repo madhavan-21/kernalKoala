@@ -51,7 +51,7 @@ build-dev:
 ## 🚀 Run the app with interface (default: lo, override with `IFACE=eth0`)
 run: dev
 	@echo "🚀 Running $(CURRENT_BIN) on interface: $(IFACE)"
-	ENV=dev $(CURRENT_BIN) $(IFACE)
+	@sudo ENV=dev $(CURRENT_BIN) $(IFACE)
 
 ## 🚀 Production multi-arch Go build
 prod: clean build-bpf
