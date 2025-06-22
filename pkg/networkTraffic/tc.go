@@ -2,6 +2,7 @@ package network
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	l "kernelKoala/internal/logger"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
@@ -36,23 +38,34 @@ type PayLoadTc struct {
 }
 
 func NetworkTrafficCapture(log *l.Logger) {
+	ctx, cancel := context.WithCancel(context.Background())
 
-	EvenChan := make(chan PayLoadTc)
+	eventChan := make(chan PayLoadTc, 10000)
 
-	printer := ifaceTablePrinter{
-		chEvent:   EvenChan,
-		tableData: make(map[string][]Event),
+	// Packet printing goroutine
+	go func() {
+		for evt := range eventChan {
+			printPacket(evt, evt.Iface)
+		}
+	}()
+
+	var collectAll bool = true
+	var interfaces []net.Interface
+	var err error
+	if collectAll == true {
+		interfaces, err = interfaceCollector()
+		if err != nil {
+			log.Fatal("failed to get interface name")
+		}
+	} else {
+		interfaces = append(interfaces, net.Interface{Name: "lo"})
 	}
 
-	printer.InitTable()
-	// Validate args
-	if len(os.Args) < 2 {
-		log.Fatal("please specify the network interface")
-	}
+	log.Info("getted interfaces : %v", interfaces)
 
+	// Load eBPF
 	arch := runtime.GOARCH
 	var archDir string
-
 	switch arch {
 	case "amd64":
 		archDir = "x86_64"
@@ -63,15 +76,12 @@ func NetworkTrafficCapture(log *l.Logger) {
 	default:
 		log.Fatal("Unsupported architecture: %s", arch)
 	}
-
-	// Locate and load BPF
 	_, filename, _, _ := runtime.Caller(0)
-	sourceDir := filepath.Dir(filename)
-	bpfPath := filepath.Join(sourceDir, "../../bpf/network/build/tc-"+archDir+".o")
+	bpfPath := filepath.Join(filepath.Dir(filename), "../../bpf/network/build/tc-"+archDir+".o")
 
-	spec, err := ebpf.LoadCollectionSpec(bpfPath)
+	spec, err := loadBpfSpec(bpfPath)
 	if err != nil {
-		log.Fatal("failed to load eBPF spec from %s: %v", bpfPath, err)
+		log.Fatal("failed to load eBPF: %v", err)
 	}
 
 	var objs struct {
@@ -82,57 +92,45 @@ func NetworkTrafficCapture(log *l.Logger) {
 
 	raiseMemlockLimit()
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		log.Fatal("failed to load eBPF spec %v", err)
+		log.Fatal("eBPF load failed: %v", err)
 	}
 	defer objs.TcIngress.Close()
 	defer objs.TcEgress.Close()
 	defer objs.Events.Close()
 
-	Interfaces, err := interfaceCollector()
-	if err != nil {
-		log.Fatal("failed to get interface name")
-	}
-
-	eventChan := make(chan PayLoadTc, 1000)
 	var wg sync.WaitGroup
 
-	// Optional consumer
-	//go func() {
-	// 	for evt := range eventChan {
-	// 		printPacket(evt.Event, evt.Iface)
-	// 	}
-	// }()
-
-	for _, iface := range Interfaces {
+	for _, iface := range interfaces {
 		wg.Add(1)
-
-		go func(iface net.Interface) {
+		iface := iface // shadow copy for goroutine
+		go func() {
 			defer wg.Done()
+			log.Info("Starting capture on %s", iface.Name)
 
 			link, err := netlink.LinkByName(iface.Name)
 			if err != nil {
-				log.Fatal("link not found: %v", err)
+				log.Warn("link not found: %v", err)
+				return
 			}
 
+			// Add clsact if needed
 			qdiscs, _ := netlink.QdiscList(link)
 			clsactExists := false
 			for _, q := range qdiscs {
-				if _, ok := q.(*netlink.GenericQdisc); ok && q.Type() == "clsact" {
+				if q.Type() == "clsact" {
 					clsactExists = true
 					break
 				}
 			}
-
 			if !clsactExists {
-				qdisc := &netlink.GenericQdisc{
+				_ = netlink.QdiscAdd(&netlink.GenericQdisc{
 					QdiscAttrs: netlink.QdiscAttrs{
 						LinkIndex: link.Attrs().Index,
 						Handle:    netlink.MakeHandle(0xffff, 0),
 						Parent:    netlink.HANDLE_CLSACT,
 					},
 					QdiscType: "clsact",
-				}
-				_ = netlink.QdiscAdd(qdisc)
+				})
 			}
 
 			// Attach filters
@@ -147,6 +145,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 				Name:         "tc_ingress",
 				DirectAction: true,
 			})
+
 			_ = netlink.FilterAdd(&netlink.BpfFilter{
 				FilterAttrs: netlink.FilterAttrs{
 					LinkIndex: link.Attrs().Index,
@@ -159,15 +158,33 @@ func NetworkTrafficCapture(log *l.Logger) {
 				DirectAction: true,
 			})
 
+			// Perf reader
 			reader, err := perf.NewReader(objs.Events, os.Getpagesize())
 			if err != nil {
-				log.Fatal("perf reader error: %v", err)
+				log.Warn("failed to create perf reader for %s: %v", iface.Name, err)
+				return
 			}
 			defer reader.Close()
 
-			// Read events
-			go func() {
-				for {
+			for {
+				select {
+				case <-ctx.Done():
+					log.Info("Stopping capture on %s", iface.Name)
+					reader.Close()
+
+					// Cleanup qdisc
+					_ = netlink.QdiscDel(&netlink.GenericQdisc{
+						QdiscAttrs: netlink.QdiscAttrs{
+							LinkIndex: link.Attrs().Index,
+							Handle:    netlink.MakeHandle(0xffff, 0),
+							Parent:    netlink.HANDLE_CLSACT,
+						},
+						QdiscType: "clsact",
+					})
+
+					return
+
+				default:
 					record, err := reader.Read()
 					if err != nil {
 						if err == perf.ErrClosed {
@@ -175,43 +192,55 @@ func NetworkTrafficCapture(log *l.Logger) {
 						}
 						continue
 					}
-					if record.LostSamples != 0 {
+
+					if record.LostSamples > 0 {
+						log.Warn("lost %d samples on %s", record.LostSamples, iface.Name)
 						continue
 					}
 
 					var event Event
 					if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
+						log.Warn("decode error on %s: %v", iface.Name, err)
+						continue
+					}
+					drop := shouldDrop(event)
+					log.Info("event droped :%v", drop)
+					if drop == true {
 						continue
 					}
 
-					printer.chEvent <- PayLoadTc{
-						Iface: iface.Name,
-						Event: event,
+					payload := PayLoadTc{Iface: iface.Name, Event: event}
+					select {
+					case eventChan <- payload:
+					case <-ctx.Done():
+						return
 					}
-
 				}
-			}()
-
-			// Wait for Ctrl+C
-			sig := make(chan os.Signal, 1)
-			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-			<-sig
-
-			// Cleanup
-			_ = netlink.QdiscDel(&netlink.GenericQdisc{
-				QdiscAttrs: netlink.QdiscAttrs{
-					LinkIndex: link.Attrs().Index,
-					Handle:    netlink.MakeHandle(0xffff, 0),
-					Parent:    netlink.HANDLE_CLSACT,
-				},
-				QdiscType: "clsact",
-			})
-		}(iface)
+			}
+		}()
 	}
 
-	// Wait for all routines to finish
-	wg.Wait()
+	// Wait for SIGINT
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+	log.Info("Shutting down...")
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		log.Warn("Timeout waiting for goroutines to finish")
+	}
+
 	close(eventChan)
+	log.Info("Shutdown complete")
 }
 
 func loadBpfSpec(path string) (*ebpf.CollectionSpec, error) {
@@ -226,111 +255,81 @@ func loadBpfSpec(path string) (*ebpf.CollectionSpec, error) {
 	return spec, nil
 }
 
-func printPacket(event Event, iface string) {
+func isLocalhost(ip uint32) bool {
+	// Match exactly 127.0.0.1 in little-endian format
+	return ip == 0x0100007F
+}
+
+func shouldDrop(event Event) bool {
+	// Drop if the source is localhost (127.0.0.1)
+	if isLocalhost(event.SrcIP) {
+		return true
+	}
+
+	// Optionally drop system DNS stub (127.0.0.53)
+	// 127.0.0.53 == 0x3500007F in little-endian
+	// if event.SrcIP == 0x3500007F && event.SrcPort == 53 {
+	// 	return true
+	// }
+
+	return false
+}
+
+func printPacket(event PayLoadTc, iface string) {
 	direction := "Ingress"
-	if event.Direction == 1 {
+	if event.Event.Direction == 1 {
 		direction = "Egress"
 	}
 
-	srcIP := intToIP(event.SrcIP)
-	dstIP := intToIP(event.DstIP)
+	srcIP := intToIP(event.Event.SrcIP)
+	dstIP := intToIP(event.Event.DstIP)
 
 	srcDomain := resolveIP(srcIP)
 	dstDomain := resolveIP(dstIP)
 
-	switch event.Protocol {
+	switch event.Event.Protocol {
 	case 6: // TCP
-		flags := tcpFlagsToString(event.TcpFlags)
-		fmt.Printf("%s TCP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d | flags=%s \n",
+		flags := tcpFlagsToString(event.Event.TcpFlags)
+		fmt.Printf("%s TCP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d | flags=%s | iface = %s \n",
 			direction,
-			srcIP, srcDomain, event.SrcPort,
-			dstIP, dstDomain, event.DstPort,
-			event.Protocol,
+			srcIP, srcDomain, event.Event.SrcPort,
+			dstIP, dstDomain, event.Event.DstPort,
+			event.Event.Protocol,
 			flags,
+			iface,
 		)
 	case 17: // UDP
-		flags := tcpFlagsToString(event.TcpFlags)
+		flags := tcpFlagsToString(event.Event.TcpFlags)
 		fmt.Printf("%s UDP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d | flags= %s | iface = %s \n",
 			direction,
-			srcIP, srcDomain, event.SrcPort,
-			dstIP, dstDomain, event.DstPort,
-			event.Protocol,
+			srcIP, srcDomain, event.Event.SrcPort,
+			dstIP, dstDomain, event.Event.DstPort,
+			event.Event.Protocol,
 			flags,
 			iface,
 		)
 	case 1: // ICMP
-		flags := tcpFlagsToString(event.TcpFlags)
+		flags := tcpFlagsToString(event.Event.TcpFlags)
 		fmt.Printf("%s ICMP: src=%s (%s) -> dst=%s (%s) | proto=%d |flags = %s, iface = %s \n",
 			direction,
 			srcIP, srcDomain,
 			dstIP, dstDomain,
-			event.Protocol,
+			event.Event.Protocol,
 			flags,
 			iface,
 		)
 	default:
-		flags := tcpFlagsToString(event.TcpFlags)
+		flags := tcpFlagsToString(event.Event.TcpFlags)
 		fmt.Printf("%s UNKNOWN: src=%s (%s) -> dst=%s (%s) | proto=%d | flags = %s , iface = %s\n",
 			direction,
 			srcIP, srcDomain,
 			dstIP, dstDomain,
-			event.Protocol,
+			event.Event.Protocol,
 			flags,
 			iface,
 		)
 	}
 }
-
-// func printPacket(event Event) {
-// 	direction := "Ingress"
-// 	if event.Direction == 1 {
-// 		direction = "Egress"
-// 	}
-
-// 	switch event.Protocol {
-// 	case 6: // TCP
-// 		flags := tcpFlagsToString(event.TcpFlags)
-// 		fmt.Printf("%s TCP: src=%s:%d -> dst=%s:%d | proto=%d | flags=%s\n",
-// 			direction,
-// 			intToIP(event.SrcIP), event.SrcPort,
-// 			intToIP(event.DstIP), event.DstPort,
-// 			event.Protocol,
-// 			flags,
-// 		)
-// 	case 17: // UDP
-// 		fmt.Printf("%s UDP: src=%s:%d -> dst=%s:%d | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP), event.SrcPort,
-// 			intToIP(event.DstIP), event.DstPort,
-// 			event.Protocol,
-// 		)
-// 	case 1: // ICMP
-// 		fmt.Printf("%s ICMP: src=%s -> dst=%s | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP),
-// 			intToIP(event.DstIP),
-// 			event.Protocol)
-// 	case 2: // IGMP
-// 		fmt.Printf("%s IGMP: src=%s -> dst=%s | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP),
-// 			intToIP(event.DstIP),
-// 			event.Protocol)
-// 	case 50:
-// 		fmt.Printf("%s ESP (IPsec): src=%s -> dst=%s | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP),
-// 			intToIP(event.DstIP),
-// 			event.Protocol)
-// 	default:
-// 		fmt.Printf("%s UNKNOWN: src=%s:%d -> dst=%s:%d | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP), event.SrcPort,
-// 			intToIP(event.DstIP), event.DstPort,
-// 			event.Protocol,
-// 		)
-// 	}
-// }
 
 func tcpFlagsToString(flags uint8) string {
 	flagNames := []struct {
