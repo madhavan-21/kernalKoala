@@ -2,6 +2,8 @@ package network
 
 import (
 	"fmt"
+	"kernelKoala/internal/logger"
+	"os"
 	"sync"
 
 	"github.com/gdamore/tcell/v2"
@@ -9,103 +11,88 @@ import (
 )
 
 type ifaceTablePrinter struct {
-	chEvent            chan PayLoadTc
-	tableData          map[string][]Event
-	mapLock            sync.RWMutex
-	maxTables          int
-	app                *tview.Application
-	tables             map[string]*tview.Table
-	ifaceOrder         []string
-	selectedIfaceIndex int
+	chEvent   chan PayLoadTc
+	app       *tview.Application
+	table     *tview.Table
+	tableData map[string][]Event
+	mapLock   sync.RWMutex
+	layout    *tview.Flex
+	header    *tview.TextView
 }
 
-func (i *ifaceTablePrinter) InitTable() {
-	i.tableData = make(map[string][]Event)
-	i.tables = make(map[string]*tview.Table)
-	i.ifaceOrder = []string{}
-	i.maxTables = 8
+// InitUI sets up the terminal dashboard layout with single header + single table.
+func (i *ifaceTablePrinter) InitUI() {
+	i.chEvent = make(chan PayLoadTc, 100)
 	i.app = tview.NewApplication()
+	i.tableData = make(map[string][]Event)
+
+	_, _ = os.Hostname()
+	i.header = tview.NewTextView()
+
+	i.header.SetDynamicColors(true)
+	i.header.SetTextAlign(tview.AlignCenter)
+
+	i.table = tview.NewTable()
+
+	i.layout = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(i.header, 1, 0, false).
+		AddItem(i.table, 0, 1, true)
+
+	i.app.SetRoot(i.layout, true).EnableMouse(true)
 
 	go i.forward()
-
-	go func() {
-		if err := i.app.SetRoot(tview.NewBox(), true).EnableMouse(true).Run(); err != nil {
-			panic(err)
-		}
-	}()
 }
 
 func (i *ifaceTablePrinter) forward() {
 	for ev := range i.chEvent {
 		i.mapLock.Lock()
-		_, exists := i.tableData[ev.Iface]
-		if !exists {
-			if len(i.tableData) >= i.maxTables {
-				i.mapLock.Unlock()
-				continue
-			}
-			i.tableData[ev.Iface] = []Event{}
-			i.tables[ev.Iface] = createInterfaceTable(ev.Iface)
-			i.ifaceOrder = append(i.ifaceOrder, ev.Iface)
-		}
-
+		logger.Info("%s", ev.Iface)
 		i.tableData[ev.Iface] = append(i.tableData[ev.Iface], ev.Event)
 		if len(i.tableData[ev.Iface]) > 10 {
 			i.tableData[ev.Iface] = i.tableData[ev.Iface][len(i.tableData[ev.Iface])-10:]
 		}
 
-		iface := ev.Iface
-		i.app.QueueUpdateDraw(func() {
-			i.updateTable(iface)
-			// Only show the first iface as default root
-			if len(i.ifaceOrder) == 1 {
-				i.app.SetRoot(i.tables[iface], true)
-			}
-		})
+		i.app.QueueUpdateDraw(i.updateTable)
 		i.mapLock.Unlock()
 	}
 }
 
-func (i *ifaceTablePrinter) updateTable(iface string) {
-	tbl := i.tables[iface]
-	events := i.tableData[iface]
+func (i *ifaceTablePrinter) updateTable() {
+	i.table.Clear()
 
-	tbl.Clear()
-	tbl.SetCell(0, 0, tview.NewTableCell(fmt.Sprintf("INTERFACE: %s", iface)).SetSelectable(false).SetAlign(tview.AlignCenter).SetTextColor(tcell.ColorGreen).SetExpansion(1).SetAttributes(tcell.AttrBold))
-	tbl.SetCell(1, 0, tview.NewTableCell("Protocol"))
-	tbl.SetCell(1, 1, tview.NewTableCell("Direction"))
-	tbl.SetCell(1, 2, tview.NewTableCell("Source"))
-	tbl.SetCell(1, 3, tview.NewTableCell("Src Port"))
-	tbl.SetCell(1, 4, tview.NewTableCell("Destination"))
-	tbl.SetCell(1, 5, tview.NewTableCell("Dst Port"))
-	tbl.SetCell(1, 6, tview.NewTableCell("Flags"))
-
-	for idx, e := range events {
-		row := idx + 2
-		proto := protocolName(e.Protocol)
-		dir := "Ingress"
-		if e.Direction == 1 {
-			dir = "Egress"
-		}
-		src := intToIP(e.SrcIP).String()
-		dst := intToIP(e.DstIP).String()
-
-		flags := tcpFlagsToString(e.TcpFlags)
-
-		tbl.SetCell(row, 0, tview.NewTableCell(proto))
-		tbl.SetCell(row, 1, tview.NewTableCell(dir))
-		tbl.SetCell(row, 2, tview.NewTableCell(src))
-		tbl.SetCell(row, 3, tview.NewTableCell(fmt.Sprintf("%d", e.SrcPort)))
-		tbl.SetCell(row, 4, tview.NewTableCell(dst))
-		tbl.SetCell(row, 5, tview.NewTableCell(fmt.Sprintf("%d", e.DstPort)))
-		tbl.SetCell(row, 6, tview.NewTableCell(flags))
+	// Table Header
+	headers := []string{"Iface", "Protocol", "Direction", "Source", "Src Port", "Destination", "Dst Port", "Flags"}
+	for j, h := range headers {
+		i.table.SetCell(0, j, tview.NewTableCell(fmt.Sprintf("[::b]%s", h)).
+			SetTextColor(tcell.ColorLightCyan).
+			SetAlign(tview.AlignCenter).
+			SetSelectable(false))
 	}
-}
 
-func createInterfaceTable(iface string) *tview.Table {
-	tbl := tview.NewTable().SetBorders(true)
-	tbl.SetTitle(fmt.Sprintf("Interface: %s", iface)).SetTitleColor(tcell.ColorAqua).SetBorder(true)
-	return tbl
+	// Fill rows
+	row := 1
+	for iface, events := range i.tableData {
+		for _, e := range events {
+			dir := "Ingress"
+			if e.Direction == 1 {
+				dir = "Egress"
+			}
+			proto := protocolName(e.Protocol)
+			src := intToIP(e.SrcIP).String()
+			dst := intToIP(e.DstIP).String()
+			flags := tcpFlagsToString(e.TcpFlags)
+
+			i.table.SetCell(row, 0, tview.NewTableCell(fmt.Sprintf("[white::b]%s", iface)))
+			i.table.SetCell(row, 1, tview.NewTableCell(proto))
+			i.table.SetCell(row, 2, tview.NewTableCell(dir))
+			i.table.SetCell(row, 3, tview.NewTableCell(src))
+			i.table.SetCell(row, 4, tview.NewTableCell(fmt.Sprintf("%d", e.SrcPort)))
+			i.table.SetCell(row, 5, tview.NewTableCell(dst))
+			i.table.SetCell(row, 6, tview.NewTableCell(fmt.Sprintf("%d", e.DstPort)))
+			i.table.SetCell(row, 7, tview.NewTableCell(flags))
+			row++
+		}
+	}
 }
 
 func protocolName(proto uint8) string {
@@ -118,38 +105,5 @@ func protocolName(proto uint8) string {
 		return "ICMP"
 	default:
 		return fmt.Sprintf("PROTO(%d)", proto)
-	}
-}
-
-// You must define:
-// - type PayLoadTc with fields: Iface string, Event Event
-// - type Event with Protocol, Direction, SrcIP, DstIP, SrcPort, DstPort, TcpFlags
-// - func intToIP(uint32) string
-// - func tcpFlagsToString(uint8) string
-
-func (i *ifaceTablePrinter) RunUI() {
-	i.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if len(i.ifaceOrder) == 0 {
-			return event
-		}
-
-		switch event.Key() {
-		case tcell.KeyRight:
-			i.selectedIfaceIndex = (i.selectedIfaceIndex + 1) % len(i.ifaceOrder)
-		case tcell.KeyLeft:
-			i.selectedIfaceIndex = (i.selectedIfaceIndex - 1 + len(i.ifaceOrder)) % len(i.ifaceOrder)
-		default:
-			return event
-		}
-
-		nextIface := i.ifaceOrder[i.selectedIfaceIndex]
-		i.app.QueueUpdateDraw(func() {
-			i.app.SetRoot(i.tables[nextIface], true)
-		})
-		return nil
-	})
-
-	if err := i.app.Run(); err != nil {
-		panic(err)
 	}
 }
