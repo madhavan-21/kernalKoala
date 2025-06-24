@@ -39,6 +39,11 @@ type PayLoadTc struct {
 
 func NetworkTrafficCapture(log *l.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
+	iface := os.Args[1]
+	if iface == "" {
+		iface = "lo"
+		log.Info("the iface was empty")
+	}
 
 	eventChan := make(chan PayLoadTc, 10000)
 
@@ -52,13 +57,15 @@ func NetworkTrafficCapture(log *l.Logger) {
 	var collectAll bool = true
 	var interfaces []net.Interface
 	var err error
-	if collectAll == true {
+	//
+
+	if collectAll == false {
 		interfaces, err = interfaceCollector()
 		if err != nil {
 			log.Fatal("failed to get interface name")
 		}
 	} else {
-		interfaces = append(interfaces, net.Interface{Name: "lo"})
+		interfaces = append(interfaces, net.Interface{Name: iface})
 	}
 
 	log.Info("getted interfaces : %v", interfaces)
