@@ -2,18 +2,24 @@ package network
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	l "kernelKoala/internal/logger"
+	"log"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/perf"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 type Event struct {
@@ -26,17 +32,47 @@ type Event struct {
 	TcpFlags  uint8
 }
 
+type PayLoadTc struct {
+	Event Event
+	Iface string
+}
+
 func NetworkTrafficCapture(log *l.Logger) {
-	if len(os.Args) < 2 {
-		log.Fatal("please specify the network interface")
+	ctx, cancel := context.WithCancel(context.Background())
+	iface := os.Args[1]
+	if iface == "" {
+		iface = "lo"
+		log.Info("the iface was empty")
 	}
 
-	ifaceName := os.Args[1]
-	log.Info("getted iface name : %s", ifaceName)
+	eventChan := make(chan PayLoadTc, 10000)
 
+	// Packet printing goroutine
+	go func() {
+		for evt := range eventChan {
+			printPacket(evt, evt.Iface)
+		}
+	}()
+
+	var collectAll bool = true
+	var interfaces []net.Interface
+	var err error
+	//
+
+	if collectAll == false {
+		interfaces, err = interfaceCollector()
+		if err != nil {
+			log.Fatal("failed to get interface name")
+		}
+	} else {
+		interfaces = append(interfaces, net.Interface{Name: iface})
+	}
+
+	log.Info("getted interfaces : %v", interfaces)
+
+	// Load eBPF
 	arch := runtime.GOARCH
 	var archDir string
-
 	switch arch {
 	case "amd64":
 		archDir = "x86_64"
@@ -47,14 +83,13 @@ func NetworkTrafficCapture(log *l.Logger) {
 	default:
 		log.Fatal("Unsupported architecture: %s", arch)
 	}
+	_, filename, _, _ := runtime.Caller(0)
+	bpfPath := filepath.Join(filepath.Dir(filename), "../../bpf/network/build/tc-"+archDir+".o")
 
-	bpfPath := fmt.Sprintf("../bpf/network/build/%s/tc.o", archDir)
-	spec, err := ebpf.LoadCollectionSpec(bpfPath)
+	spec, err := loadBpfSpec(bpfPath)
 	if err != nil {
-		log.Fatal("failed to load eBPF spec from %s: %v", bpfPath, err)
+		log.Fatal("failed to load eBPF: %v", err)
 	}
-
-	log.Info("Successfully loaded BPF spec for : %s", archDir)
 
 	var objs struct {
 		TcIngress *ebpf.Program `ebpf:"tc_ingress"`
@@ -62,172 +97,157 @@ func NetworkTrafficCapture(log *l.Logger) {
 		Events    *ebpf.Map     `ebpf:"events"`
 	}
 
+	raiseMemlockLimit()
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		log.Fatal("failed to load eBPF spec %v", err)
+		log.Fatal("eBPF load failed: %v", err)
 	}
-
 	defer objs.TcIngress.Close()
 	defer objs.TcEgress.Close()
 	defer objs.Events.Close()
 
-	link, err := netlink.LinkByName(ifaceName)
-	if err != nil {
-		log.Fatal("error on finding link by name : %v", err.Error())
-	}
-	log.Info("getted netlink name : %v", link)
-	qdiscs, err := netlink.QdiscList(link)
-	if err != nil {
-		log.Fatal("listening qdsics: %v", err)
-	}
+	var wg sync.WaitGroup
 
-	clsactExists := false
+	for _, iface := range interfaces {
+		wg.Add(1)
+		iface := iface // shadow copy for goroutine
+		go func() {
+			defer wg.Done()
+			log.Info("Starting capture on %s", iface.Name)
 
-	for _, qdisc := range qdiscs {
-		if _, ok := qdisc.(*netlink.GenericQdisc); ok && qdisc.Type() == "clsact" {
-			clsactExists = true
-			break
-		}
-	}
-
-	if clsactExists == false {
-		qdisc := &netlink.GenericQdisc{
-			QdiscAttrs: netlink.QdiscAttrs{
-				LinkIndex: link.Attrs().Index,
-				Handle:    netlink.MakeHandle(0xffff, 0),
-				Parent:    netlink.HANDLE_CLSACT,
-			},
-			QdiscType: "clsact",
-		}
-		if err := netlink.QdiscAdd(qdisc); err != nil {
-			log.Fatal("adding clsact qdisc: %v", err)
-		}
-		log.Info("Added clsact qdisc")
-	} else {
-		log.Info("clsact qdisc already exists")
-	}
-
-	ingressFilter := &netlink.BpfFilter{
-		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: link.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_INGRESS,
-			Handle:    netlink.MakeHandle(0, 1),
-			Protocol:  syscall.ETH_P_ALL,
-		},
-		Fd:           objs.TcIngress.FD(),
-		Name:         "tc_ingress",
-		DirectAction: true,
-	}
-
-	if err := netlink.FilterAdd(ingressFilter); err != nil {
-		log.Fatal("adding ingress filter: %v", err)
-	}
-	fmt.Println("Added ingress filter")
-
-	egressFilter := &netlink.BpfFilter{
-		FilterAttrs: netlink.FilterAttrs{
-			LinkIndex: link.Attrs().Index,
-			Parent:    netlink.HANDLE_MIN_EGRESS,
-			Handle:    netlink.MakeHandle(0, 1),
-			Protocol:  syscall.ETH_P_ALL,
-		},
-		Fd:           objs.TcEgress.FD(),
-		Name:         "tc_egress",
-		DirectAction: true,
-	}
-	if err := netlink.FilterAdd(egressFilter); err != nil {
-		log.Fatal("adding egress filter: %v", err)
-	}
-	fmt.Println("Added egress filter")
-
-	// perf reader
-	reader, err := perf.NewReader(objs.Events, os.Getpagesize())
-	if err != nil {
-		log.Fatal("creating perf reader: %v", err)
-	}
-	defer reader.Close()
-
-	// read events
-	go func() {
-		for {
-			record, err := reader.Read()
+			link, err := netlink.LinkByName(iface.Name)
 			if err != nil {
-				if err == perf.ErrClosed {
-					return
+				log.Warn("link not found: %v", err)
+				return
+			}
+
+			// Add clsact if needed
+			qdiscs, _ := netlink.QdiscList(link)
+			clsactExists := false
+			for _, q := range qdiscs {
+				if q.Type() == "clsact" {
+					clsactExists = true
+					break
 				}
-				log.Info("reading from perf event reader: %s", err)
-				continue
+			}
+			if !clsactExists {
+				_ = netlink.QdiscAdd(&netlink.GenericQdisc{
+					QdiscAttrs: netlink.QdiscAttrs{
+						LinkIndex: link.Attrs().Index,
+						Handle:    netlink.MakeHandle(0xffff, 0),
+						Parent:    netlink.HANDLE_CLSACT,
+					},
+					QdiscType: "clsact",
+				})
 			}
 
-			if record.LostSamples != 0 {
-				log.Info(
-					"perf event ring buffer full, dropped %d samples",
-					record.LostSamples,
-				)
-				continue
-			}
+			// Attach filters
+			_ = netlink.FilterAdd(&netlink.BpfFilter{
+				FilterAttrs: netlink.FilterAttrs{
+					LinkIndex: link.Attrs().Index,
+					Parent:    netlink.HANDLE_MIN_INGRESS,
+					Handle:    netlink.MakeHandle(0, 1),
+					Protocol:  syscall.ETH_P_ALL,
+				},
+				Fd:           objs.TcIngress.FD(),
+				Name:         "tc_ingress",
+				DirectAction: true,
+			})
 
-			var event Event
-			if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
-				log.Info("parsing perf event: %s", err)
-				continue
-			}
-			printPacket(event)
+			_ = netlink.FilterAdd(&netlink.BpfFilter{
+				FilterAttrs: netlink.FilterAttrs{
+					LinkIndex: link.Attrs().Index,
+					Parent:    netlink.HANDLE_MIN_EGRESS,
+					Handle:    netlink.MakeHandle(0, 1),
+					Protocol:  syscall.ETH_P_ALL,
+				},
+				Fd:           objs.TcEgress.FD(),
+				Name:         "tc_egress",
+				DirectAction: true,
+			})
 
-		}
+			// Perf reader
+			reader, err := perf.NewReader(objs.Events, os.Getpagesize())
+			if err != nil {
+				log.Warn("failed to create perf reader for %s: %v", iface.Name, err)
+				return
+			}
+			defer reader.Close()
+
+			for {
+				select {
+				case <-ctx.Done():
+					log.Info("Stopping capture on %s", iface.Name)
+					reader.Close()
+
+					// Cleanup qdisc
+					_ = netlink.QdiscDel(&netlink.GenericQdisc{
+						QdiscAttrs: netlink.QdiscAttrs{
+							LinkIndex: link.Attrs().Index,
+							Handle:    netlink.MakeHandle(0xffff, 0),
+							Parent:    netlink.HANDLE_CLSACT,
+						},
+						QdiscType: "clsact",
+					})
+
+					return
+
+				default:
+					record, err := reader.Read()
+					if err != nil {
+						if err == perf.ErrClosed {
+							return
+						}
+						continue
+					}
+
+					if record.LostSamples > 0 {
+						log.Warn("lost %d samples on %s", record.LostSamples, iface.Name)
+						continue
+					}
+
+					var event Event
+					if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
+						log.Warn("decode error on %s: %v", iface.Name, err)
+						continue
+					}
+					drop := shouldDrop(event)
+					log.Info("event droped :%v", drop)
+					if drop == true {
+						continue
+					}
+
+					payload := PayLoadTc{Iface: iface.Name, Event: event}
+					select {
+					case eventChan <- payload:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// Wait for SIGINT
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+	log.Info("Shutting down...")
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
 	}()
 
-	fmt.Printf("eBPF programs attached to interface %s\n", ifaceName)
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-
-	fmt.Println("Received interrupt, cleaning up...")
-
-	// Clean up filters
-	filters, err := netlink.FilterList(link, netlink.HANDLE_MIN_INGRESS)
-	if err != nil {
-		log.Info("error listing ingress filters: %v", err)
-	} else {
-		for _, filter := range filters {
-			if bpfFilter, ok := filter.(*netlink.BpfFilter); ok && bpfFilter.Name == "tc_ingress" {
-				if err := netlink.FilterDel(bpfFilter); err != nil {
-					log.Info("error removing ingress filter: %v", err)
-				} else {
-					fmt.Println("Removed ingress filter")
-				}
-			}
-		}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		log.Warn("Timeout waiting for goroutines to finish")
 	}
 
-	filterss, err := netlink.FilterList(link, netlink.HANDLE_MIN_EGRESS)
-	if err != nil {
-		log.Info("error listing egress filters: %v", err)
-	} else {
-		for _, filter := range filterss {
-			if bpfFilter, ok := filter.(*netlink.BpfFilter); ok && bpfFilter.Name == "tc_egress" {
-				if err := netlink.FilterDel(bpfFilter); err != nil {
-					log.Info("error removing egress filter: %v", err)
-				} else {
-					fmt.Println("Removed egress filter")
-				}
-			}
-		}
-	}
-
-	qdisc := &netlink.GenericQdisc{
-		QdiscAttrs: netlink.QdiscAttrs{
-			LinkIndex: link.Attrs().Index,
-			Handle:    netlink.MakeHandle(0xffff, 0),
-			Parent:    netlink.HANDLE_CLSACT,
-		},
-		QdiscType: "clsact",
-	}
-	if err := netlink.QdiscDel(qdisc); err != nil {
-		log.Fatal("deleting clsact qdisc: %v", err)
-	}
-	fmt.Println("Deleted clsact qdisc")
-
+	close(eventChan)
+	log.Info("Shutdown complete")
 }
 
 func loadBpfSpec(path string) (*ebpf.CollectionSpec, error) {
@@ -242,102 +262,81 @@ func loadBpfSpec(path string) (*ebpf.CollectionSpec, error) {
 	return spec, nil
 }
 
-func printPacket(event Event) {
+func isLocalhost(ip uint32) bool {
+	// Match exactly 127.0.0.1 in little-endian format
+	return ip == 0x0100007F
+}
+
+func shouldDrop(event Event) bool {
+	// Drop if the source is localhost (127.0.0.1)
+	if isLocalhost(event.SrcIP) {
+		return true
+	}
+
+	// Optionally drop system DNS stub (127.0.0.53)
+	// 127.0.0.53 == 0x3500007F in little-endian
+	// if event.SrcIP == 0x3500007F && event.SrcPort == 53 {
+	// 	return true
+	// }
+
+	return false
+}
+
+func printPacket(event PayLoadTc, iface string) {
 	direction := "Ingress"
-	if event.Direction == 1 {
+	if event.Event.Direction == 1 {
 		direction = "Egress"
 	}
 
-	srcIP := intToIP(event.SrcIP)
-	dstIP := intToIP(event.DstIP)
+	srcIP := intToIP(event.Event.SrcIP)
+	dstIP := intToIP(event.Event.DstIP)
 
 	srcDomain := resolveIP(srcIP)
 	dstDomain := resolveIP(dstIP)
 
-	switch event.Protocol {
+	switch event.Event.Protocol {
 	case 6: // TCP
-		flags := tcpFlagsToString(event.TcpFlags)
-		fmt.Printf("%s TCP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d | flags=%s\n",
+		flags := tcpFlagsToString(event.Event.TcpFlags)
+		fmt.Printf("%s TCP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d | flags=%s | iface = %s \n",
 			direction,
-			srcIP, srcDomain, event.SrcPort,
-			dstIP, dstDomain, event.DstPort,
-			event.Protocol,
+			srcIP, srcDomain, event.Event.SrcPort,
+			dstIP, dstDomain, event.Event.DstPort,
+			event.Event.Protocol,
 			flags,
+			iface,
 		)
 	case 17: // UDP
-		fmt.Printf("%s UDP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d\n",
+		flags := tcpFlagsToString(event.Event.TcpFlags)
+		fmt.Printf("%s UDP: src=%s (%s):%d -> dst=%s (%s):%d | proto=%d | flags= %s | iface = %s \n",
 			direction,
-			srcIP, srcDomain, event.SrcPort,
-			dstIP, dstDomain, event.DstPort,
-			event.Protocol,
+			srcIP, srcDomain, event.Event.SrcPort,
+			dstIP, dstDomain, event.Event.DstPort,
+			event.Event.Protocol,
+			flags,
+			iface,
 		)
 	case 1: // ICMP
-		fmt.Printf("%s ICMP: src=%s (%s) -> dst=%s (%s) | proto=%d\n",
+		flags := tcpFlagsToString(event.Event.TcpFlags)
+		fmt.Printf("%s ICMP: src=%s (%s) -> dst=%s (%s) | proto=%d |flags = %s, iface = %s \n",
 			direction,
 			srcIP, srcDomain,
 			dstIP, dstDomain,
-			event.Protocol,
+			event.Event.Protocol,
+			flags,
+			iface,
 		)
 	default:
-		fmt.Printf("%s UNKNOWN: src=%s (%s) -> dst=%s (%s) | proto=%d\n",
+		flags := tcpFlagsToString(event.Event.TcpFlags)
+		fmt.Printf("%s UNKNOWN: src=%s (%s) -> dst=%s (%s) | proto=%d | flags = %s , iface = %s\n",
 			direction,
 			srcIP, srcDomain,
 			dstIP, dstDomain,
-			event.Protocol,
+			event.Event.Protocol,
+			flags,
+			iface,
 		)
 	}
 }
-
-// func printPacket(event Event) {
-// 	direction := "Ingress"
-// 	if event.Direction == 1 {
-// 		direction = "Egress"
-// 	}
-
-// 	switch event.Protocol {
-// 	case 6: // TCP
-// 		flags := tcpFlagsToString(event.TcpFlags)
-// 		fmt.Printf("%s TCP: src=%s:%d -> dst=%s:%d | proto=%d | flags=%s\n",
-// 			direction,
-// 			intToIP(event.SrcIP), event.SrcPort,
-// 			intToIP(event.DstIP), event.DstPort,
-// 			event.Protocol,
-// 			flags,
-// 		)
-// 	case 17: // UDP
-// 		fmt.Printf("%s UDP: src=%s:%d -> dst=%s:%d | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP), event.SrcPort,
-// 			intToIP(event.DstIP), event.DstPort,
-// 			event.Protocol,
-// 		)
-// 	case 1: // ICMP
-// 		fmt.Printf("%s ICMP: src=%s -> dst=%s | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP),
-// 			intToIP(event.DstIP),
-// 			event.Protocol)
-// 	case 2: // IGMP
-// 		fmt.Printf("%s IGMP: src=%s -> dst=%s | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP),
-// 			intToIP(event.DstIP),
-// 			event.Protocol)
-// 	case 50:
-// 		fmt.Printf("%s ESP (IPsec): src=%s -> dst=%s | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP),
-// 			intToIP(event.DstIP),
-// 			event.Protocol)
-// 	default:
-// 		fmt.Printf("%s UNKNOWN: src=%s:%d -> dst=%s:%d | proto=%d\n",
-// 			direction,
-// 			intToIP(event.SrcIP), event.SrcPort,
-// 			intToIP(event.DstIP), event.DstPort,
-// 			event.Protocol,
-// 		)
-// 	}
-// }
 
 func tcpFlagsToString(flags uint8) string {
 	flagNames := []struct {
@@ -375,4 +374,16 @@ func resolveIP(ip net.IP) string {
 		return "-"
 	}
 	return names[0]
+}
+
+//raiseMemlockLimit() is added to allow the app to lock more memory, which is needed for eBPF programs and maps. Without it, the app may fail with "permission denied" errors. It solves this by raising the memory lock limit to unlimited.
+
+func raiseMemlockLimit() {
+	rLimit := &unix.Rlimit{
+		Cur: unix.RLIM_INFINITY,
+		Max: unix.RLIM_INFINITY,
+	}
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, rLimit); err != nil {
+		log.Fatalf("❌ Failed to raise rlimit: %v", err)
+	}
 }
