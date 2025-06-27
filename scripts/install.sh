@@ -20,7 +20,7 @@ echo "📦 Tidying Go modules..."
 go mod tidy
 
 # 2. Install eBPF build tools
-echo "🔍 Checking and installing eBPF tools..."
+echo "🔍 Checking and installing eBPF tools....."
 
 PKGS=""
 if ! command_exists clang; then PKGS="$PKGS clang"; fi
@@ -46,7 +46,6 @@ fi
 
 # Install all required packages
 echo "📦 Installing packages: $PKGS"
-sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $PKGS
 
 # Optional: clone libbpf submodule if using
@@ -63,3 +62,12 @@ bpftool version || true
 go version
 
 echo "🎉 Installation complete."
+
+# Colorful work complete banner
+echo -e "\e[1;35m"
+echo "╔═══════════════════════════════════════════════════════════════════════════════╗"
+echo "║                                                                               ║"
+echo "║   🚀  \e[1;36mkernelKoala: Setup & Build Completed Successfully\e[1;35m   🚀  ║"
+echo "║                                                                                 ║"
+echo "╚═══════════════════════════════════════════════════════════════════════════════╝"
+echo -e "\e[0m"
