@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	l "kernelKoala/internal/logger"
 	"net"
@@ -38,11 +39,20 @@ type PayLoadTc struct {
 
 func NetworkTrafficCapture(log *l.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
-	iface := os.Args[1]
-	if iface == "" {
-		iface = "lo"
-		l.Info("the iface was empty")
+
+	iface := flag.String("iface", "", "Network interface to attach (can also set IFACE env variable)")
+	flag.Parse()
+
+	if *iface == "" {
+		if envIface := os.Getenv("IFACE"); envIface != "" {
+			*iface = envIface
+		} else {
+			*iface = "lo"
+			l.Info("Interface not provided; defaulting to 'lo'")
+		}
 	}
+
+	l.Info("Using interface: %s", *iface)
 
 	eventChan := make(chan PayLoadTc, 10000)
 
@@ -64,7 +74,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 			l.Fatal("failed to get interface name")
 		}
 	} else {
-		interfaces = append(interfaces, net.Interface{Name: iface})
+		interfaces = append(interfaces, net.Interface{Name: *iface})
 	}
 
 	l.Info("getted interfaces : %v", interfaces)
