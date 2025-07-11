@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	l "kernelKoala/internal/logger"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -42,7 +41,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 	iface := os.Args[1]
 	if iface == "" {
 		iface = "lo"
-		log.Info("the iface was empty")
+		l.Info("the iface was empty")
 	}
 
 	eventChan := make(chan PayLoadTc, 10000)
@@ -62,13 +61,13 @@ func NetworkTrafficCapture(log *l.Logger) {
 	if collectAll == false {
 		interfaces, err = interfaceCollector()
 		if err != nil {
-			log.Fatal("failed to get interface name")
+			l.Fatal("failed to get interface name")
 		}
 	} else {
 		interfaces = append(interfaces, net.Interface{Name: iface})
 	}
 
-	log.Info("getted interfaces : %v", interfaces)
+	l.Info("getted interfaces : %v", interfaces)
 
 	// Load eBPF
 	arch := runtime.GOARCH
@@ -81,14 +80,14 @@ func NetworkTrafficCapture(log *l.Logger) {
 	case "riscv64":
 		archDir = "riscv64"
 	default:
-		log.Fatal("Unsupported architecture: %s", arch)
+		l.Fatal("Unsupported architecture: %s", arch)
 	}
 	_, filename, _, _ := runtime.Caller(0)
 	bpfPath := filepath.Join(filepath.Dir(filename), "../../bpf/network/build/tc-"+archDir+".o")
 
 	spec, err := loadBpfSpec(bpfPath)
 	if err != nil {
-		log.Fatal("failed to load eBPF: %v", err)
+		l.Fatal("failed to load eBPF: %v", err)
 	}
 
 	var objs struct {
@@ -99,7 +98,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 
 	raiseMemlockLimit()
 	if err := spec.LoadAndAssign(&objs, nil); err != nil {
-		log.Fatal("eBPF load failed: %v", err)
+		l.Fatal("eBPF load failed: %v", err)
 	}
 	defer objs.TcIngress.Close()
 	defer objs.TcEgress.Close()
@@ -112,11 +111,11 @@ func NetworkTrafficCapture(log *l.Logger) {
 		iface := iface // shadow copy for goroutine
 		go func() {
 			defer wg.Done()
-			log.Info("Starting capture on %s", iface.Name)
+			l.Info("Starting capture on %s", iface.Name)
 
 			link, err := netlink.LinkByName(iface.Name)
 			if err != nil {
-				log.Warn("link not found: %v", err)
+				l.Warn("link not found: %v", err)
 				return
 			}
 
@@ -168,7 +167,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 			// Perf reader
 			reader, err := perf.NewReader(objs.Events, os.Getpagesize())
 			if err != nil {
-				log.Warn("failed to create perf reader for %s: %v", iface.Name, err)
+				l.Warn("failed to create perf reader for %s: %v", iface.Name, err)
 				return
 			}
 			defer reader.Close()
@@ -176,7 +175,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 			for {
 				select {
 				case <-ctx.Done():
-					log.Info("Stopping capture on %s", iface.Name)
+					l.Info("Stopping capture on %s", iface.Name)
 					reader.Close()
 
 					// Cleanup qdisc
@@ -201,17 +200,17 @@ func NetworkTrafficCapture(log *l.Logger) {
 					}
 
 					if record.LostSamples > 0 {
-						log.Warn("lost %d samples on %s", record.LostSamples, iface.Name)
+						l.Warn("lost %d samples on %s", record.LostSamples, iface.Name)
 						continue
 					}
 
 					var event Event
 					if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
-						log.Warn("decode error on %s: %v", iface.Name, err)
+						l.Warn("decode error on %s: %v", iface.Name, err)
 						continue
 					}
 					drop := shouldDrop(event)
-					log.Info("event droped :%v", drop)
+					l.Info("event droped :%v", drop)
 					if drop == true {
 						continue
 					}
@@ -231,7 +230,7 @@ func NetworkTrafficCapture(log *l.Logger) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig
-	log.Info("Shutting down...")
+	l.Info("Shutting down...")
 	cancel()
 
 	done := make(chan struct{})
@@ -243,11 +242,11 @@ func NetworkTrafficCapture(log *l.Logger) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		log.Warn("Timeout waiting for goroutines to finish")
+		l.Warn("Timeout waiting for goroutines to finish")
 	}
 
 	close(eventChan)
-	log.Info("Shutdown complete")
+	l.Info("Shutdown complete")
 }
 
 func loadBpfSpec(path string) (*ebpf.CollectionSpec, error) {
@@ -384,6 +383,6 @@ func raiseMemlockLimit() {
 		Max: unix.RLIM_INFINITY,
 	}
 	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, rLimit); err != nil {
-		log.Fatalf("❌ Failed to raise rlimit: %v", err)
+		l.Fatal("❌ Failed to raise rlimit: %v", err)
 	}
 }
