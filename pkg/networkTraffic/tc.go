@@ -40,9 +40,12 @@ type PayLoadTc struct {
 func NetworkTrafficCapture(log *l.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Parse flags
 	iface := flag.String("iface", "", "Network interface to attach (can also set IFACE env variable)")
+	loopbackFlag := flag.Bool("loopback", true, "Set to false to allow localhost (loopback) traffic; default is true (drop loopback)")
 	flag.Parse()
 
+	// Resolve interface: flag → env → default
 	if *iface == "" {
 		if envIface := os.Getenv("IFACE"); envIface != "" {
 			*iface = envIface
@@ -52,7 +55,21 @@ func NetworkTrafficCapture(log *l.Logger) {
 		}
 	}
 
+	// Resolve loopback: flag → env → default
+	loopback := *loopbackFlag
+	if envVal, ok := os.LookupEnv("LOOPBACK"); ok {
+		switch envVal {
+		case "false", "0", "False", "FALSE":
+			loopback = false
+		case "true", "1", "True", "TRUE":
+			loopback = true
+		default:
+			l.Warn("Invalid LOOPBACK value: %s, using flag/default: %v", envVal, loopback)
+		}
+	}
+
 	l.Info("Using interface: %s", *iface)
+	l.Info("Loopback filtering enabled: %v", loopback)
 
 	eventChan := make(chan PayLoadTc, 10000)
 
@@ -219,10 +236,14 @@ func NetworkTrafficCapture(log *l.Logger) {
 						l.Warn("decode error on %s: %v", iface.Name, err)
 						continue
 					}
-					drop := shouldDrop(event)
-					l.Info("event droped :%v", drop)
-					if drop == true {
-						continue
+
+					// it will drop localhost events
+					if loopback == true {
+						drop := shouldDrop(event)
+						if drop == true {
+							l.Info("event droped :%v", drop)
+							continue
+						}
 					}
 
 					payload := PayLoadTc{Iface: iface.Name, Event: event}
