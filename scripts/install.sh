@@ -38,40 +38,44 @@ if [ ! -d "$KERNEL_HEADERS_PATH" ]; then
     PKGS+=" linux-headers-$(uname -r)"
 fi
 
-# Optional mirror fix (CI environments)
+# Optional fix: switch to valid Ubuntu mirror if broken
 if grep -q "mirror+file:/etc/apt/apt-mirrors.txt" /etc/apt/sources.list 2>/dev/null; then
-    echo "⚠️  Using broken mirror config. Switching to default Ubuntu mirrors..."
+    echo "⚠️  Detected broken mirror. Replacing with official Ubuntu mirror..."
     sudo sed -i 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
     sudo apt-get update
 fi
 
-# Install all required packages
+# 3. Attempt installation with retry logic
 echo "📦 Installing packages: $PKGS"
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $PKGS --fix-missing
+if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $PKGS; then
+    echo "⚠️  First install failed. Retrying with --fix-missing..."
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y $PKGS --fix-missing
+fi
 
-# Fix missing asm/ headers (conditionally)
+# 4. Fix missing asm/ headers if needed
 if [ -d "$KERNEL_HEADERS_PATH/include" ] && [ ! -e "$KERNEL_HEADERS_PATH/include/asm/types.h" ]; then
   echo "🔧 Linking missing asm/ headers..."
   sudo ln -sf ../arch/x86/include/asm "$KERNEL_HEADERS_PATH/include/asm"
 fi
 
-# 3. Initialize submodules
+# 5. Initialize git submodules (if any)
 if [ -f .gitmodules ]; then
     echo "🔁 Initializing git submodules..."
     git submodule update --init --recursive
 fi
 
-# 4. Print tool versions
+# 6. Print versions
 echo "🔧 Tool versions:"
 clang --version || true
 llc --version || true
 bpftool version || true
 go version
 
-# 5. Done
+# 7. Done
 echo -e "\e[1;32m🎉 Installation complete.\e[0m"
 
-# Fancy success banner
+# Fancy banner
 echo -e "\e[1;35m"
 echo "╔═══════════════════════════════════════════════════════════════════════════════╗"
 echo "║                                                                               ║"
