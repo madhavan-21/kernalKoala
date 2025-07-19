@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kernelkoala
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: kernelkoala
+  template:
+    metadata:
+      labels:
+        app: kernelkoala
+    spec:
+      hostNetwork: true
+      hostPID: true
+      containers:
+        - name: kernelkoala
+          image: kernelkoala:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: IFACE
+              value: "eth0"  # or your desired interface
+            - name: ENV
+              value: "prod"
+          volumeMounts:
+            - name: modules
+              mountPath: /lib/modules
+              readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: bpf
+              mountPath: /sys/fs/bpf
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+      volumes:
+        - name: modules
+          hostPath:
+            path: /lib/modules
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: bpf
+          hostPath:
+            path: /sys/fs/bpf
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug

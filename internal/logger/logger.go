@@ -75,7 +75,7 @@ type Config struct {
 // DefaultConfig returns default logger configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Level:     INFO,
+		Level:     ERROR,
 		AddCaller: true,
 		AddTime:   true,
 		FilePath:  os.Getenv("LOG_PATH"),

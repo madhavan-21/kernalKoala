@@ -1,5 +1,5 @@
 # Stage 1: Build Go binary and BPF modules
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.24.3 AS builder
 
 # Install build tools for BPF
 RUN apt-get update && apt-get install -y \

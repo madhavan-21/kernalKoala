@@ -46,4 +46,21 @@ func PrintHeader() {
 	fig := figure.NewFigure("KernelKoala", "", true)
 	green := color.New(color.FgHiGreen).Add(color.Bold)
 	PrintCentered(fig.String(), green)
+
+	koala := `
+        .-"      "-.
+       /            \
+      |              |
+      |,  .-.  .-.  ,|
+      | )(_o/  \o_)( |
+      |/     /\     \|
+      (_     ^^     _)
+       \__|IIIIII|__/
+        | \IIIIII/ |
+        \          /
+         '--------'
+   🐨 KernelKoala is watching your packets(epbf-packet capture "🐝")
+`
+	grey := color.New(color.FgHiWhite)
+	PrintCentered(koala, grey)
 }
