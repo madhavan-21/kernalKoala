@@ -1,4 +1,4 @@
-**KernelKoala - eBPF Network Traffic Capture Tool**
+***🐨📦 KernelKoala - eBPF Network Traffic Capture Tool 🔬🐝***
 
 ![Custom Image](/config/assest/kernalkoala.png)
 
@@ -25,9 +25,9 @@ A high-performance network traffic analyzer built with eBPF in Go. It supports T
 
 🔧 Requirements
 
- => Linux Kernel ≥ 5.4 (with eBPF and tc support)
- => Go ≥ 1.20
- => Dependencies managed in go.mod:
+  *Linux Kernel ≥ 5.4 (with eBPF and tc support)*
+  *Go ≥ 1.20*
+  *Dependencies managed in go.mod*
 ```
     github.com/cilium/ebpf v0.12.3
     github.com/vishvananda/netlink v1.1.0
@@ -192,5 +192,7 @@ Netshoot
 🧑‍💻 Author
  
 ***Maintained by Madhavan S.***
-💬 For questions, feel free to ask here.
+
+
+***💬 For questions, feel free to ask here.***
 
