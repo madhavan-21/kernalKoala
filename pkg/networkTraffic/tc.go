@@ -366,7 +366,6 @@ func parseConfig() *CaptureConfig {
 		}
 	} else {
 		config.Interface = *iface
-		fmt.Println("iface is--------------", config.Interface)
 	}
 
 	// Resolve loopback filtering
