@@ -3,25 +3,6 @@
 
 Welcome to the development guide for the KernelKoala project! This guide walks you through setting up your environment, running tests, building Go binaries, and compiling eBPF programs.
 
-### 🧱 Project Structure
-
-KernelKoala/
-├── api/  
-├── config/          # Main Go application entry point
-├── cmd/             # Main Go application entry point
-├── internal/        # Internal Go packages
-├── pkg/             # Shared Go packages
-├── bpf/             # All eBPF programs
-│   ├── network/
-│   │   ├── tc.c
-│   │   ├── tc.o
-│   │   └── Makefile
-│   └── trace/       # (optional, if added later)
-├── bin/             # Output binaries after build
-├── Makefile         # Root-level Makefile for Go & eBPF
-└── DevReadme.md     # This file
-
-
 ### ⚙️ Prerequisites
 
 ```bash
